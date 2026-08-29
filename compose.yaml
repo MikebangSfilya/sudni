@@ -4,6 +4,6 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      STATE_PATH: /app/state.json
+      STATE_PATH: /data/state.json
     volumes:
-      - ./state.json:/app/state.json
+      - ./data:/data
