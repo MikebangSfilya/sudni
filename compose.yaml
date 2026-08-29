@@ -3,5 +3,7 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      STATE_PATH: /app/state.json
     volumes:
       - ./state.json:/app/state.json
