@@ -62,6 +62,10 @@ TIMEZONE = load_timezone()
 REVIEW_INTERVAL_SECONDS = env_int("REVIEW_INTERVAL_SECONDS", 3600, 300, 3600)
 DAILY_POST_HOUR = env_int("DAILY_POST_HOUR", 9, 0, 23)
 DAILY_POST_MINUTE = env_int("DAILY_POST_MINUTE", 0, 0, 59)
+QUICK_VOTE_BUTTONS = (
+    ("▲ Трясёт", "shake:up"),
+    ("▼ Отпускает", "shake:down"),
+)
 
 
 def utc_now() -> datetime:
@@ -287,6 +291,8 @@ def settle_chat(chat: dict[str, Any], reviewed_at: datetime) -> dict[str, Any]:
         "vote_delta": vote_delta,
         "message_delta": message_delta,
         "total_delta": new_value - old_value,
+        "votes_used": len(votes) if votes_used else 0,
+        "signals_used": len(signals) if signals_used else 0,
         "pending_votes": 0 if votes_used else len(votes),
         "pending_signals": 0 if signals_used else len(signals),
     }
@@ -375,12 +381,11 @@ def render_clock(value: int) -> io.BytesIO:
     draw.ellipse((center[0] - 25, center[1] - 25, center[0] + 25, center[1] + 25), fill=WHITE)
     draw.ellipse((center[0] - 10, center[1] - 10, center[0] + 10, center[1] + 10), fill="#e05252")
 
-    title_font = font(54, bold=True)
+    title_font = font(52, bold=True)
     value_font = font(180, bold=True)
     label_font = font(34)
     level_font = font(44, bold=True)
-    small_font = font(27)
-    centered_text(draw, 62, "ИНДЕКС ТРЯСКИ", title_font, WHITE)
+    centered_text(draw, 28, "ИНДЕКС ТРЯСКИ", title_font, WHITE)
     centered_text(draw, 300, str(value), value_font, WHITE)
     centered_text(draw, 665, f"{shake_level(value).upper()} · ИЗ 100", level_font, WHITE)
 
@@ -395,14 +400,6 @@ def render_clock(value: int) -> io.BytesIO:
         )
 
     centered_text(draw, 870, "Тема: мобилизация в РФ", label_font, WHITE)
-    centered_text(draw, 1030, "Пересчёт каждый час по голосам и сигналам чата", small_font, MUTED)
-    centered_text(
-        draw,
-        1070,
-        "Иллюстративный индекс — не прогноз и не статистика",
-        small_font,
-        MUTED,
-    )
 
     output = io.BytesIO()
     output.name = "shake-index.png"
@@ -420,8 +417,7 @@ def local_time_text(value: Any) -> str:
 
 def help_text() -> str:
     return (
-        "Индекс тряски обновляется не реже раза в час. Он отражает настроение этого чата, "
-        "а не вероятность реального события.\n\n"
+        "Индекс тряски обновляется не реже раза в час.\n\n"
         "Команды:\n"
         "/clock — индекс и циферблат\n"
         "/up [1–10] — предложить повышение\n"
@@ -430,17 +426,44 @@ def help_text() -> str:
         "/why — детали последнего пересчёта\n"
         "/history — изменения за последние сутки\n\n"
         f"Для влияния нужны минимум {MIN_VOTES} уникальных голоса или {MIN_SIGNALS} независимых "
-        "сигнала из сообщений. Голос живёт 24 часа, сигнал — 6 часов."
+        "сигнала из сообщений. Голос живёт 24 часа, сигнал — 6 часов. "
+        "На карточках можно голосовать кнопками."
     )
 
 
+def movement_icon(delta: int) -> str:
+    if delta > 0:
+        return "📈"
+    if delta < 0:
+        return "📉"
+    return "➖"
+
+
 def review_caption(result: dict[str, Any], heading: str = "Почасовой пересчёт") -> str:
-    return (
-        f"{heading}: {result['new']}/100 — {shake_level(result['new'])}\n"
-        f"Изменение: {result['total_delta']:+d} п.\n"
-        f"Голоса: {result['vote_delta']:+d} п. ({result['votes']})\n"
-        f"Сигналы чата: {result['message_delta']:+d} п. ({result['signals']})\n"
-        "Иллюстративный индекс, не прогноз и не официальная статистика."
+    delta = result["total_delta"]
+    old_level = shake_level(result["old"])
+    new_level = shake_level(result["new"])
+    lines = [
+        f"{movement_icon(delta)} {heading}: {result['new']}/100 — {new_level}",
+        f"Изменение: {delta:+d} п.",
+        f"Голоса: {result['vote_delta']:+d} п. ({result['votes']})",
+        f"Сигналы чата: {result['message_delta']:+d} п. ({result['signals']})",
+    ]
+    if old_level != new_level:
+        lines.insert(1, f"⚡ Новый режим: {old_level} → {new_level}")
+    return "\n".join(lines)
+
+
+def vote_keyboard() -> Any:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=text, callback_data=data)
+                for text, data in QUICK_VOTE_BUTTONS
+            ]
+        ]
     )
 
 
@@ -452,13 +475,14 @@ async def send_clock(bot: Any, chat_id: int, value: int, caption: str) -> None:
         chat_id,
         BufferedInputFile(image.getvalue(), filename="shake-index.png"),
         caption=caption,
+        reply_markup=vote_keyboard(),
     )
 
 
 def register_handlers(dp: Any, state: State) -> None:
     from aiogram import F, Router
     from aiogram.filters import Command, CommandObject, CommandStart
-    from aiogram.types import Message
+    from aiogram.types import CallbackQuery, Message
 
     router = Router()
 
@@ -481,8 +505,7 @@ def register_handlers(dp: Any, state: State) -> None:
             reviewed = local_time_text(chat["last_review_at"])
         caption = (
             f"Сейчас: {value}/100 — {shake_level(value)}\n"
-            f"Последний пересчёт: {reviewed}\n"
-            "Иллюстративный индекс, не прогноз."
+            f"Последний пересчёт: {reviewed}"
         )
         await send_clock(message.bot, message.chat.id, value, caption)
 
@@ -510,6 +533,21 @@ def register_handlers(dp: Any, state: State) -> None:
     @router.message(Command("down"))
     async def down_command(message: Message, command: CommandObject) -> None:
         await vote_command(message, command, -1)
+
+    @router.callback_query(F.data.in_({"shake:up", "shake:down"}))
+    async def quick_vote(callback: CallbackQuery) -> None:
+        if not callback.message:
+            await callback.answer("Карточка уже недоступна")
+            return
+        direction = 1 if callback.data == "shake:up" else -1
+        async with state.lock:
+            chat = state.chat(callback.message.chat.id)
+            count = record_observation(
+                chat["votes"], callback.from_user.id, direction, utc_now()
+            )
+            state.save()
+        action = "Трясёт сильнее: +1" if direction > 0 else "Отпускает: −1"
+        await callback.answer(f"{action}. Активных голосов: {count}")
 
     @router.message(Command("vote", "status"))
     async def vote_status(message: Message) -> None:
@@ -555,7 +593,15 @@ def register_handlers(dp: Any, state: State) -> None:
                 f"За последние 24 часа изменений не было. Пересчётов: {len(recent)}."
             )
             return
-        lines = ["Изменения индекса за 24 часа:"]
+        values = [recent[0]["old"], *(item["new"] for item in recent)]
+        total_change = values[-1] - values[0]
+        lines = [
+            f"{movement_icon(total_change)} За 24 часа: {values[0]} → {values[-1]} "
+            f"({total_change:+d})",
+            f"Диапазон: {min(values)}–{max(values)}",
+            "",
+            "Последние изменения:",
+        ]
         for item in changes[-12:]:
             lines.append(
                 f"{local_time_text(item.get('at'))}: {item['old']} → {item['new']} "
@@ -653,11 +699,14 @@ async def daily_summary_worker(bot: Any, state: State) -> None:
         for chat_id, value, recent in summaries:
             start_value = recent[0]["old"] if recent else value
             change = value - start_value
+            values = [start_value, *(item["new"] for item in recent)]
+            votes_used = sum(item.get("votes_used", 0) for item in recent)
+            signals_used = sum(item.get("signals_used", 0) for item in recent)
             caption = (
-                f"Сводка за сутки: {value}/100 — {shake_level(value)}\n"
+                f"{movement_icon(change)} Сводка за сутки: {value}/100 — {shake_level(value)}\n"
                 f"Изменение за 24 часа: {change:+d} п.\n"
-                f"Почасовых пересчётов: {len(recent)}\n"
-                "Иллюстративный индекс, не прогноз и не официальная статистика."
+                f"Диапазон: {min(values)}–{max(values)}\n"
+                f"Активность: {votes_used} голосов · {signals_used} сигналов"
             )
             try:
                 await send_clock(bot, chat_id, value, caption)

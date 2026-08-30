@@ -120,6 +120,27 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(bot.shake_level(25), "потряхивает")
         self.assertEqual(bot.shake_level(75), "сильно трясёт")
 
+    def test_caption_marks_level_transition_without_disclaimer(self) -> None:
+        result = {
+            "old": 49,
+            "new": 52,
+            "total_delta": 3,
+            "vote_delta": 3,
+            "message_delta": 0,
+            "votes": 2,
+            "signals": 0,
+        }
+        caption = bot.review_caption(result)
+        self.assertIn("Новый режим: потряхивает → трясёт", caption)
+        self.assertNotIn("прогноз", caption.lower())
+        self.assertNotIn("статистик", caption.lower())
+
+    def test_card_has_quick_vote_buttons(self) -> None:
+        self.assertEqual(
+            [data for _, data in bot.QUICK_VOTE_BUTTONS],
+            ["shake:up", "shake:down"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
