@@ -670,9 +670,11 @@ async def configure_bot(bot: Any) -> None:
 
     commands = [
         BotCommand(command="clock", description="текущий индекс тряски"),
+        BotCommand(command="index", description="текущий индекс тряски"),
         BotCommand(command="up", description="предложить повышение на 1–10"),
         BotCommand(command="down", description="предложить снижение на 1–10"),
         BotCommand(command="vote", description="активные голоса и сигналы"),
+        BotCommand(command="status", description="активные голоса и сигналы"),
         BotCommand(command="why", description="почему индекс изменился"),
         BotCommand(command="history", description="изменения за сутки"),
         BotCommand(command="help", description="как работает бот"),
