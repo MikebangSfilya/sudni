@@ -1,2 +1,4 @@
 aiogram>=3,<4
 Pillow>=10,<11
+openai>=2,<3
+pydantic>=2,<3
