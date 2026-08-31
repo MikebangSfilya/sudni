@@ -181,6 +181,71 @@ class MessageBufferTests(unittest.TestCase):
 
 
 class LLMAnalysisTests(unittest.TestCase):
+    def test_unattributed_event_claims_are_attributed_to_chat(self) -> None:
+        cases = (
+            (
+                "Пишут, что завтра объявят мобилизацию",
+                "Участники обсуждают сообщения о возможном объявлении мобилизации.",
+                "Завтра объявят мобилизацию.",
+            ),
+            (
+                "Да это опять фейк, никакой мобки не будет",
+                "Участники преимущественно относятся к слуху скептически.",
+                "Мобилизации не будет.",
+            ),
+            (
+                "Ну всё, завтра всех заберут, ахахах",
+                "Участники воспринимают сообщение как возможную шутку или иронию.",
+                "Завтра всех заберут, ахахах.",
+            ),
+        )
+
+        for chat_message, safe_summary, unsafe_summary in cases:
+            with self.subTest(chat_message=chat_message):
+                safe_analysis = bot.normalize_llm_analysis(
+                    {
+                        "decision": "hold",
+                        "delta": 0,
+                        "confidence": 0.8,
+                        "relevant_messages": 1,
+                        "summary": safe_summary,
+                        "factors": [safe_summary],
+                    },
+                    message_count=1,
+                    model="test-model",
+                )
+                guarded_analysis = bot.normalize_llm_analysis(
+                    {
+                        "decision": "hold",
+                        "delta": 0,
+                        "confidence": 0.8,
+                        "relevant_messages": 1,
+                        "summary": unsafe_summary,
+                        "factors": [unsafe_summary],
+                    },
+                    message_count=1,
+                    model="test-model",
+                )
+
+                self.assertEqual(safe_analysis["summary"], safe_summary)
+                self.assertTrue(
+                    guarded_analysis["summary"].startswith(
+                        "Участники выражают это так: «"
+                    )
+                )
+                self.assertTrue(
+                    guarded_analysis["factors"][0].startswith(
+                        "Участники выражают это так: «"
+                    )
+                )
+                if "ахахах" in unsafe_summary:
+                    self.assertIn("ахахах", guarded_analysis["summary"])
+
+    def test_prompt_limits_analysis_to_chat_and_preserves_irony(self) -> None:
+        self.assertIn("не проверяешь факты", bot.LLM_INSTRUCTIONS)
+        self.assertIn("не оценивай вероятность реального события", bot.LLM_INSTRUCTIONS)
+        self.assertIn("иронию, сарказм", bot.LLM_INSTRUCTIONS)
+
     def test_low_confidence_suggestion_is_not_applied(self) -> None:
         analysis = bot.normalize_llm_analysis(
             {
@@ -251,12 +316,12 @@ class LLMAnalysisTests(unittest.TestCase):
         class FakeParsed:
             def model_dump(self) -> dict[str, object]:
                 return {
-                    "decision": "increase",
-                    "delta": 2,
-                    "confidence": 0.9,
+                    "discussion_trend": "increase",
+                    "discussion_delta": 2,
+                    "analysis_confidence": 0.9,
                     "relevant_messages": 3,
-                    "summary": "Аноны стали обсуждать тему серьёзнее.",
-                    "factors": ["меньше иронии"],
+                    "discussion_summary": "Участники стали обсуждать тему серьёзнее.",
+                    "discussion_factors": ["В чате стало меньше иронии."],
                 }
 
         class FakeResponse:
@@ -290,18 +355,21 @@ class LLMAnalysisTests(unittest.TestCase):
         self.assertEqual(client.responses.kwargs["model"], "gpt-5.6-luna")
         self.assertNotIn("123456789", str(client.responses.kwargs["input"]))
         self.assertIn("anon-1", str(client.responses.kwargs["input"]))
+        schema = client.responses.kwargs["text_format"].model_json_schema()
+        self.assertIn("discussion_summary", schema["properties"])
+        self.assertNotIn("summary", schema["properties"])
 
     @unittest.skipUnless(importlib.util.find_spec("pydantic"), "pydantic is not installed")
     def test_deepseek_request_uses_only_supported_privacy_parameters(self) -> None:
         class FakeParsed:
             def model_dump(self) -> dict[str, object]:
                 return {
-                    "decision": "hold",
-                    "delta": 0,
-                    "confidence": 0.8,
+                    "discussion_trend": "hold",
+                    "discussion_delta": 0,
+                    "analysis_confidence": 0.8,
                     "relevant_messages": 3,
-                    "summary": "Обсуждение не изменило общий настрой.",
-                    "factors": [],
+                    "discussion_summary": "Обсуждение не изменило общий настрой.",
+                    "discussion_factors": [],
                 }
 
         class FakeResponse:
@@ -339,12 +407,12 @@ class LLMAnalysisTests(unittest.TestCase):
         class FakeParsed:
             def model_dump(self) -> dict[str, object]:
                 return {
-                    "decision": "increase",
-                    "delta": 1,
-                    "confidence": 0.8,
+                    "discussion_trend": "increase",
+                    "discussion_delta": 1,
+                    "analysis_confidence": 0.8,
                     "relevant_messages": 3,
-                    "summary": "Тревога немного усилилась.",
-                    "factors": ["серьёзное обсуждение"],
+                    "discussion_summary": "В чате тревога немного усилилась.",
+                    "discussion_factors": ["Участники обсуждают тему серьёзнее."],
                 }
 
         class FakeResponse:
@@ -462,7 +530,7 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(bot.shake_level(25), "потряхивает")
         self.assertEqual(bot.shake_level(75), "сильно трясёт")
 
-    def test_caption_marks_level_transition_without_disclaimer(self) -> None:
+    def test_caption_marks_level_transition(self) -> None:
         result = {
             "old": 49,
             "new": 52,
@@ -474,8 +542,39 @@ class RenderingTests(unittest.TestCase):
         }
         caption = bot.review_caption(result)
         self.assertIn("Новый режим: потряхивает → трясёт", caption)
-        self.assertNotIn("прогноз", caption.lower())
-        self.assertNotIn("статистик", caption.lower())
+
+    def test_card_explains_topic_and_disclaims_prediction(self) -> None:
+        with patch.object(bot, "centered_text") as centered_text:
+            bot.render_clock(42)
+
+        card_text = [call.args[2] for call in centered_text.call_args_list]
+        self.assertIn("Настроение чата по теме мобилизации", card_text)
+        self.assertIn(bot.PUBLIC_DISCLAIMER, card_text)
+
+    def test_llm_caption_labels_discussion_analysis(self) -> None:
+        result = {
+            "old": 50,
+            "new": 51,
+            "total_delta": 1,
+            "vote_delta": 0,
+            "message_delta": 0,
+            "llm_delta": 1,
+            "votes": 0,
+            "signals": 0,
+            "llm": {
+                "status": "analyzed",
+                "confidence": 0.8,
+                "summary": "Участники чаще обсуждают слухи.",
+                "factors": ["В чате усилилась тревога."],
+                "relevant_messages": 3,
+                "message_count": 5,
+            },
+        }
+
+        caption = bot.review_caption(result)
+
+        self.assertIn("уверенность разбора 80%", caption)
+        self.assertIn("Почему чат изменился:", caption)
 
     def test_card_has_quick_vote_buttons(self) -> None:
         self.assertEqual(
